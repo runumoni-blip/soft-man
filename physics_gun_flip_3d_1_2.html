@@ -138,6 +138,18 @@
             background: #8b5cf6;
             color: #ffffff;
         }
+        /* Camera zoom selector (top-left HUD): the active setting is highlighted */
+        .zoom-btn {
+            color: #334155;
+            transition: background-color 0.15s ease, color 0.15s ease;
+        }
+        .zoom-btn:hover {
+            background: #f5f3ff;
+        }
+        .zoom-btn.active {
+            background: #8b5cf6;
+            color: #ffffff;
+        }
         #lib-error { display: none; }
     </style>
 </head>
@@ -151,7 +163,7 @@
     <div class="pointer-events-none absolute inset-x-0 top-0 p-3 sm:p-5 flex justify-between items-start z-20">
 
         <!-- Top-Left: Level Title + Restart & Sound Icons -->
-        <div class="flex flex-col items-start space-y-2 pointer-events-auto">
+        <div class="relative flex flex-col items-start space-y-2 pointer-events-auto">
             <div class="flex items-center space-x-3">
                 <h1 id="level-display" class="stroke-text text-xl sm:text-4xl font-extrabold tracking-wide whitespace-nowrap">
                     Level 1
@@ -183,6 +195,22 @@
                         <line x1="17" y1="9" x2="23" y2="15"></line>
                     </svg>
                 </button>
+            </div>
+
+            <!-- Camera Zoom Selector: Low / Medium / High (High Zoom when the game starts).
+                 Absolutely positioned so the column's clickable area does not grow over the scene. -->
+            <div id="zoom-control" title="Camera Zoom" class="absolute left-0 top-full w-11 sm:w-max cartoon-pill rounded-2xl sm:rounded-full bg-white/95 p-1 flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-0.5 whitespace-nowrap">
+                <svg class="order-last sm:order-none w-4 h-4 sm:w-5 sm:h-5 mx-auto my-0.5 sm:my-0 sm:ml-1.5 sm:mr-1 text-slate-900" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="7"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    <line x1="11" y1="8" x2="11" y2="14"></line>
+                    <line x1="8" y1="11" x2="14" y2="11"></line>
+                </svg>
+                <button data-zoom="low" title="Low Zoom" class="zoom-btn rounded-xl sm:rounded-full py-1.5 sm:py-1 sm:px-3 text-[10px] sm:text-xs font-extrabold uppercase tracking-wide">Low</button>
+                <button data-zoom="medium" title="Medium Zoom" class="zoom-btn rounded-xl sm:rounded-full py-1.5 sm:py-1 sm:px-3 text-[10px] sm:text-xs font-extrabold uppercase tracking-wide">
+                    <span class="sm:hidden">Med</span><span class="hidden sm:inline">Medium</span>
+                </button>
+                <button data-zoom="high" title="High Zoom" class="zoom-btn rounded-xl sm:rounded-full py-1.5 sm:py-1 sm:px-3 text-[10px] sm:text-xs font-extrabold uppercase tracking-wide">High</button>
             </div>
         </div>
 
@@ -1737,6 +1765,45 @@
             camera.updateProjectionMatrix();
         }
         fitCamera();
+
+        // Camera zoom (Low / Medium / High): magnifies the fitCamera() framing by cropping it around the gun.
+        // Low Zoom is exactly the original full view; High Zoom is the default when the game starts.
+        const _zoomPos = new THREE.Vector3();
+        const CamZoom = {
+            LEVELS: { low: 1, medium: 1.35, high: 1.75 },
+            mode: 'high',
+            z: 1.75,
+            cx: 0,
+            cy: 0,
+            set(mode) {
+                if (this.LEVELS[mode]) this.mode = mode;
+            },
+            update(dt, focus) {
+                const target = this.LEVELS[this.mode];
+                this.z += (target - this.z) * Math.min(1, 6 * dt);
+                if (Math.abs(target - this.z) < 0.002) this.z = target;
+                if (this.z <= 1) {
+                    this.cx = this.cy = 0;
+                    if (camera.view && camera.view.enabled) camera.clearViewOffset();
+                    return;
+                }
+                // Where the focus point sits in the original view (-1..1 on both axes)
+                camera.updateMatrixWorld();
+                const p = _zoomPos.copy(focus).applyMatrix4(camera.matrixWorldInverse);
+                const vt = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+                const fx = p.x / (-p.z * vt * camera.aspect);
+                const fy = p.y / (-p.z * vt);
+                // Pan only when the gun nears the edge of the zoomed view (kept clear of the top HUD),
+                // never past the edges of the original view
+                const h = 1 / this.z, lim = 1 - h, k = Math.min(1, 3 * dt);
+                const tx = fx - clamp((fx - this.cx) / h, -0.55, 0.55) * h;
+                const ty = fy - clamp((fy - this.cy) / h, -0.55, 0.45) * h;
+                this.cx = clamp(this.cx + (tx - this.cx) * k, -lim, lim);
+                this.cy = clamp(this.cy + (ty - this.cy) * k, -lim, lim);
+                const W = window.innerWidth, H = Math.max(1, window.innerHeight);
+                camera.setViewOffset(W, H, (1 + this.cx - h) * 0.5 * W, (1 - this.cy - h) * 0.5 * H, W * h, H * h);
+            }
+        };
 
         // Lighting rig (fixed light count so shaders never recompile between levels)
         const hemiLight = new THREE.HemisphereLight(0xffffff, 0x8d7f6f, 0.75);
@@ -6551,6 +6618,27 @@
             sound.playPropBounce(0.7);
         });
 
+        // Camera zoom selector (top-left, under Restart & Sound)
+        const ZOOM_NAMES = { low: 'Low Zoom', medium: 'Medium Zoom', high: 'High Zoom' };
+        const zoomButtons = document.querySelectorAll('#zoom-control [data-zoom]');
+        const syncZoomButtons = () => {
+            zoomButtons.forEach((b) => {
+                const on = b.dataset.zoom === CamZoom.mode;
+                b.classList.toggle('active', on);
+                b.setAttribute('aria-pressed', on);
+            });
+        };
+        zoomButtons.forEach((b) => {
+            b.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (b.dataset.zoom === CamZoom.mode) return;
+                CamZoom.set(b.dataset.zoom);
+                syncZoomButtons();
+                UI.toast(ZOOM_NAMES[CamZoom.mode], '#7c3aed');
+            });
+        });
+        syncZoomButtons();
+
         $('btn-shop').addEventListener('click', (e) => { e.stopPropagation(); Shop.open('guns'); });
         $('gun-chip').addEventListener('click', (e) => { e.stopPropagation(); Shop.open('upgrades'); });
         $('btn-close-shop').addEventListener('click', () => Shop.close());
@@ -6679,6 +6767,9 @@
                 camera.position.y += (Math.random() - 0.5) * camFx.shake * 0.5;
             }
             camera.lookAt(defaultLookAt);
+
+            // 7. Camera zoom (Low / Medium / High)
+            CamZoom.update(realDt, gun.pos);
 
             perf.logic = perf.logic * 0.95 + (performance.now() - tLogic) * 0.05;
             renderer.render(scene, camera);
